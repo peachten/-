@@ -16,9 +16,14 @@ public final class RedisKeyConstant {
 
     private static final String PREFIX = "short-link:";
 
-    /* ---------- 短链跳转缓存：String，1 天 + 随机 0~1h，空值写 "" ---------- */
-    public static String gotoCache(String domain, String shortUri) {
-        return PREFIX + "goto:" + domain + ":" + shortUri;
+    /**
+     * 短链跳转缓存：String，1 天 + 随机 0~1h，空值写 ""
+     * <p>
+     * key 必须含 gid：短链后缀的唯一性是 (gid, short_uri)，
+     * 不含 gid 会导致不同分组下的同后缀互相覆盖缓存、跳转到错误链接。
+     */
+    public static String gotoCache(String domain, String gid, String shortUri) {
+        return PREFIX + "goto:" + domain + ":" + gid + ":" + shortUri;
     }
 
     /* ---------- 布隆过滤器：Redisson RBloomFilter，永久（期望插入量 100w，误判率 0.01） ---------- */

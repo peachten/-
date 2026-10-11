@@ -17,19 +17,13 @@ public class SaTokenConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new SaInterceptor(handle -> StpUtil.checkLogin()))
-                .addPathPatterns("/**")
+                // 只拦截管理端接口；跳转接口 /{shortUri}、/{gid}/{shortUri}、404 页面、静态资源天然放行
+                .addPathPatterns("/api/**")
                 .excludePathPatterns(
                         "/api/short-link/admin/v1/user/login",
                         "/api/short-link/admin/v1/user/register",
                         "/api/short-link/admin/v1/user/has-username",
-                        "/api/short-link/admin/v1/health",
-                        // Knife4j 静态资源，漏一个 doc.html 就打不开
-                        "/doc.html",
-                        "/webjars/**",
-                        "/v3/api-docs/**",
-                        "/swagger-ui/**",
-                        "/favicon.ico",
-                        "/error"
+                        "/api/short-link/admin/v1/health"
                 );
     }
 }

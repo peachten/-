@@ -1,5 +1,6 @@
 package com.peachten.shortlink.service.impl;
 
+import com.peachten.shortlink.common.constant.RedisKeyConstant;
 import com.peachten.shortlink.common.exception.BizException;
 import com.peachten.shortlink.dao.LinkMapper;
 import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
@@ -21,6 +22,7 @@ import org.redisson.api.RedissonClient;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
@@ -36,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -68,6 +71,8 @@ class ShortLinkServiceImplTest {
     private StringRedisTemplate stringRedisTemplate;
     @Mock
     private SetOperations<String, String> setOperations;
+    @Mock
+    private ValueOperations<String, String> valueOperations;
 
     @InjectMocks
     private ShortLinkServiceImpl shortLinkService;
@@ -75,7 +80,8 @@ class ShortLinkServiceImplTest {
     @BeforeEach
     void setUp() {
         ReflectionTestUtils.setField(shortLinkService, "defaultDomain", DOMAIN);
-        when(groupService.checkOwnership(GID)).thenReturn(new TGroup());
+        // 创建链路用；跳转（restoreUrl）不经过归属校验，故用 lenient 避免多余存根告警
+        lenient().when(groupService.checkOwnership(GID)).thenReturn(new TGroup());
     }
 
     /** ── 幂等：两次创建同一长链，只落一条 ── */
@@ -184,6 +190,102 @@ class ShortLinkServiceImplTest {
         verify(setOperations).add(anyString(), eq(SHORT_URI));
     }
 
+    /** ── 跳转：缓存命中，直接返回且不查库 ── */
+    @Test
+    void restoreUrl_缓存命中_直接返回不查库() {
+        when(bloomFilterService.mightContain(GID, SHORT_URI)).thenReturn(true);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get(cacheKey())).thenReturn(ORIGIN_URL);
+
+        assertEquals(ORIGIN_URL, shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        verify(linkMapper, never()).selectOne(any());
+    }
+
+    /** ── 跳转：命中空值缓存，直接 404 且不查库 ── */
+    @Test
+    void restoreUrl_空值缓存_返回null不查库() {
+        when(bloomFilterService.mightContain(GID, SHORT_URI)).thenReturn(true);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get(cacheKey())).thenReturn("");
+
+        assertNull(shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        verify(linkMapper, never()).selectOne(any());
+    }
+
+    /** ── 跳转：布隆判 false，连缓存都不查（防缓存穿透关键路径） ── */
+    @Test
+    void restoreUrl_布隆判定不存在_返回null且不查缓存() {
+        when(bloomFilterService.mightContain(GID, "zzzzzz")).thenReturn(false);
+
+        assertNull(shortLinkService.restoreUrl(GID, "zzzzzz"));
+
+        verify(stringRedisTemplate, never()).opsForValue();
+        verify(linkMapper, never()).selectOne(any());
+    }
+
+    /** ── 跳转：后缀格式非法，连布隆都不查 ── */
+    @Test
+    void restoreUrl_后缀格式非法_返回null且不查布隆() {
+        assertNull(shortLinkService.restoreUrl(GID, "abc"));
+
+        verify(bloomFilterService, never()).mightContain(anyString(), anyString());
+        verify(linkMapper, never()).selectOne(any());
+    }
+
+    /** ── 跳转：库里不存在，写空值缓存 ── */
+    @Test
+    void restoreUrl_库中不存在_写空值缓存并返回null() {
+        stubCacheMiss();
+        when(linkMapper.selectOne(any())).thenReturn(null);
+
+        assertNull(shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        verify(valueOperations).set(cacheKey(), "", 60L, TimeUnit.SECONDS);
+    }
+
+    /** ── 跳转：短链被禁用，写空值缓存 ── */
+    @Test
+    void restoreUrl_短链已禁用_写空值缓存并返回null() {
+        stubCacheMiss();
+        TLink link = availableLink();
+        link.setEnableStatus(1);
+        when(linkMapper.selectOne(any())).thenReturn(link);
+
+        assertNull(shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        verify(valueOperations).set(cacheKey(), "", 60L, TimeUnit.SECONDS);
+    }
+
+    /** ── 跳转：短链已过期，写空值缓存 ── */
+    @Test
+    void restoreUrl_短链已过期_写空值缓存并返回null() {
+        stubCacheMiss();
+        TLink link = availableLink();
+        link.setValidDateType(1);
+        link.setValidDate(LocalDateTime.now().minusDays(1));
+        when(linkMapper.selectOne(any())).thenReturn(link);
+
+        assertNull(shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        verify(valueOperations).set(cacheKey(), "", 60L, TimeUnit.SECONDS);
+    }
+
+    /** ── 跳转：正常回源，回写缓存且 TTL 带随机（防雪崩） ── */
+    @Test
+    void restoreUrl_正常回源_回写缓存且TTL为1天加随机值() {
+        stubCacheMiss();
+        when(linkMapper.selectOne(any())).thenReturn(availableLink());
+
+        assertEquals(ORIGIN_URL, shortLinkService.restoreUrl(GID, SHORT_URI));
+
+        ArgumentCaptor<Long> ttlCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(valueOperations).set(eq(cacheKey()), eq(ORIGIN_URL), ttlCaptor.capture(), eq(TimeUnit.SECONDS));
+        long ttl = ttlCaptor.getValue();
+        assertTrue(ttl >= 86400 && ttl <= 90000, "TTL 应在 1 天 ~ 1 天 1 小时之间，实际=" + ttl);
+    }
+
     // ---------- helpers ----------
 
     private ShortLinkCreateReqDTO buildReq() {
@@ -220,5 +322,27 @@ class ShortLinkServiceImplTest {
         ArgumentCaptor<TLink> captor = ArgumentCaptor.forClass(TLink.class);
         verify(linkMapper).insert(captor.capture());
         return captor.getValue();
+    }
+
+    private String cacheKey() {
+        return RedisKeyConstant.gotoCache(DOMAIN, GID, SHORT_URI);
+    }
+
+    /** 跳转缓存未命中（布隆 true + Redis get 返回 null） */
+    private void stubCacheMiss() {
+        when(bloomFilterService.mightContain(GID, SHORT_URI)).thenReturn(true);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get(cacheKey())).thenReturn(null);
+    }
+
+    /** 一条可用短链：启用 + 永久有效 */
+    private TLink availableLink() {
+        TLink link = new TLink();
+        link.setGid(GID);
+        link.setShortUri(SHORT_URI);
+        link.setOriginUrl(ORIGIN_URL);
+        link.setEnableStatus(0);
+        link.setValidDateType(0);
+        return link;
     }
 }

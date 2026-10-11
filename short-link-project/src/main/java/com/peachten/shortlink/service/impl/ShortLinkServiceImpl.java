@@ -26,7 +26,9 @@ import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -35,6 +37,14 @@ public class ShortLinkServiceImpl implements ShortLinkService {
 
     /** 等锁时间：拿不到锁说明并发创建同一长链，直接提示稍后重试 */
     private static final long LOCK_WAIT_SECONDS = 3;
+
+    /** 短链后缀格式：6 位 Base62 */
+    private static final Pattern SHORT_URI_PATTERN = Pattern.compile("^[0-9a-zA-Z]{6}$");
+    /** 跳转缓存基础 TTL：1 天，再叠加随机值防雪崩 */
+    private static final long CACHE_BASE_SECONDS = Duration.ofDays(1).getSeconds();
+    private static final int CACHE_RANDOM_BOUND = 3600;
+    /** 空值缓存 TTL：60 秒 */
+    private static final long NULL_CACHE_SECONDS = 60;
 
     private final LinkMapper linkMapper;
     private final GroupService groupService;
@@ -152,6 +162,77 @@ public class ShortLinkServiceImpl implements ShortLinkService {
                 throw new BizException("失效时间必须晚于当前时间");
             }
         }
+    }
+
+    @Override
+    public String restoreUrl(String gid, String shortUri) {
+        // 1. 格式预校验：连 Redis 都不查
+        if (!isValidShortUri(shortUri)) {
+            return null;
+        }
+
+        // 2. 布隆过滤器：false 表示一定不存在，直接结束（这是防缓存穿透的第一道防线）
+        if (!bloomFilterService.mightContain(gid, shortUri)) {
+            return null;
+        }
+
+        String cacheKey = RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri);
+
+        // 3. 查缓存：miss / 空值缓存 / 命中
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            if (cached.isEmpty()) {
+                // 空值缓存：之前查过且不存在，直接 404
+                return null;
+            }
+            logAccess(gid, shortUri);
+            return cached;
+        }
+
+        // 4. 缓存未命中：查库
+        TLink link = linkMapper.selectOne(Wrappers.lambdaQuery(TLink.class)
+                .eq(TLink::getGid, gid)
+                .eq(TLink::getShortUri, shortUri));
+        // 逻辑删除的记录查不到；这里再挡掉「不存在 / 已禁用 / 已过期」
+        if (link == null || Integer.valueOf(1).equals(link.getEnableStatus()) || isExpired(link)) {
+            cacheNull(gid, shortUri);
+            return null;
+        }
+
+        // 5. 回源：写缓存（随机 TTL 防雪崩）
+        cacheOriginUrl(gid, shortUri, link.getOriginUrl());
+        logAccess(gid, shortUri);
+        return link.getOriginUrl();
+    }
+
+    /** 6 位 Base62 校验，长度或字符集不合法直接 404 */
+    private boolean isValidShortUri(String shortUri) {
+        return shortUri != null && SHORT_URI_PATTERN.matcher(shortUri).matches();
+    }
+
+    /** 有效期类型为自定义且已过期 */
+    private boolean isExpired(TLink link) {
+        return Integer.valueOf(1).equals(link.getValidDateType())
+                && link.getValidDate() != null
+                && link.getValidDate().isBefore(LocalDateTime.now());
+    }
+
+    /** 回写原始链接：TTL = 1 天 + 随机 0~3600 秒，避免大量 key 同时过期造成雪崩 */
+    private void cacheOriginUrl(String gid, String shortUri, String originUrl) {
+        long ttl = CACHE_BASE_SECONDS + ThreadLocalRandom.current().nextInt(CACHE_RANDOM_BOUND);
+        stringRedisTemplate.opsForValue().set(
+                RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri), originUrl, ttl, TimeUnit.SECONDS);
+    }
+
+    /** 空值缓存：TTL 60 秒，挡住对同一个不存在短链的重复穿透 */
+    private void cacheNull(String gid, String shortUri) {
+        stringRedisTemplate.opsForValue().set(
+                RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri), "", NULL_CACHE_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /** W2D4 先打印日志，第 3 周改为发 MQ 异步落库 */
+    private void logAccess(String gid, String shortUri) {
+        log.info("短链访问, gid={}, shortUri={}", gid, shortUri);
     }
 
     private TLink findExist(String gid, String originUrlHash) {
