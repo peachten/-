@@ -26,4 +26,7 @@ public interface GroupService {
 
     /** 校验分组存在且属于当前登录用户，返回分组；供创建短链等其他模块复用 */
     TGroup checkOwnership(String gid);
+
+    /** 当前登录用户的全部 gid，用于短链分页时限定数据范围 */
+    List<String> listGids();
 }

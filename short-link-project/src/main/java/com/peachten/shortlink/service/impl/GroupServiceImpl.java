@@ -65,6 +65,15 @@ public class GroupServiceImpl implements GroupService {
                 Wrappers.lambdaQuery(TGroup.class).eq(TGroup::getUsername, StpUtil.getLoginIdAsString()));
     }
 
+    @Override
+    public List<String> listGids() {
+        return groupMapper.selectList(Wrappers.lambdaQuery(TGroup.class)
+                        .eq(TGroup::getUsername, StpUtil.getLoginIdAsString()))
+                .stream()
+                .map(TGroup::getGid)
+                .toList();
+    }
+
     /**
      * 归属校验：分组必须存在且属于当前登录用户。
      * 两种情况返回同一个提示，避免暴露"该分组属于别人"这一信息。

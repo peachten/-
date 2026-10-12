@@ -1,15 +1,24 @@
 package com.peachten.shortlink.service.impl;
 
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.peachten.shortlink.common.constant.RedisKeyConstant;
 import com.peachten.shortlink.common.exception.BizException;
+import com.peachten.shortlink.common.result.ResultCode;
+import com.peachten.shortlink.component.DelayedCacheDeleter;
 import com.peachten.shortlink.dao.LinkMapper;
 import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
+import com.peachten.shortlink.dto.ShortLinkPageReqDTO;
+import com.peachten.shortlink.dto.ShortLinkUpdateReqDTO;
 import com.peachten.shortlink.entity.TGroup;
 import com.peachten.shortlink.entity.TLink;
 import com.peachten.shortlink.service.BloomFilterService;
 import com.peachten.shortlink.service.GroupService;
 import com.peachten.shortlink.util.ShortUriGenerator;
 import com.peachten.shortlink.vo.ShortLinkCreateRespVO;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -17,6 +26,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.dao.DuplicateKeyException;
@@ -26,6 +36,8 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -73,9 +85,18 @@ class ShortLinkServiceImplTest {
     private SetOperations<String, String> setOperations;
     @Mock
     private ValueOperations<String, String> valueOperations;
+    @Mock
+    private DelayedCacheDeleter delayedCacheDeleter;
 
     @InjectMocks
     private ShortLinkServiceImpl shortLinkService;
+
+    @BeforeAll
+    static void initMybatisPlusTableInfo() {
+        // MyBatis-Plus 的 LambdaWrapper 需要 TableInfo 缓存（正常由 MP 启动时初始化）。
+        // 纯单测没有 MP 上下文，这里手动初始化一次，避免用例之间依赖执行顺序。
+        TableInfoHelper.initTableInfo(new MapperBuilderAssistant(new MybatisConfiguration(), ""), TLink.class);
+    }
 
     @BeforeEach
     void setUp() {
@@ -286,6 +307,72 @@ class ShortLinkServiceImplTest {
         assertTrue(ttl >= 86400 && ttl <= 90000, "TTL 应在 1 天 ~ 1 天 1 小时之间，实际=" + ttl);
     }
 
+    /** ── 分页：排序字段必须走白名单，禁止 SQL 注入 ── */
+    @Test
+    void pageLink_非法排序字段_抛参数错误() {
+        ShortLinkPageReqDTO req = new ShortLinkPageReqDTO();
+        req.setGid(GID);
+        req.setOrderTag("create_time;DROP TABLE t_link");
+
+        BizException ex = assertThrows(BizException.class, () -> shortLinkService.pageLink(req));
+
+        assertEquals(ResultCode.PARAM_ERROR.getCode(), ex.getCode());
+        verify(linkMapper, never()).selectPage(any(), any());
+    }
+
+    /** ── 修改：更新 DB 后清理缓存（延迟双删） ── */
+    @Test
+    void updateLink_修改后删除缓存() {
+        TLink link = ownedLink();
+        when(linkMapper.selectOne(any())).thenReturn(link);
+
+        ShortLinkUpdateReqDTO req = new ShortLinkUpdateReqDTO();
+        req.setFullShortUrl(link.getFullShortUrl());
+        req.setDescribe("新的备注");
+        shortLinkService.updateLink(req);
+
+        verify(linkMapper).update(any(), any());
+        verify(stringRedisTemplate).delete(cacheKey());
+        verify(delayedCacheDeleter).deleteAfter(cacheKey(), 500L);
+    }
+
+    /** ── 禁用：更新状态并清理缓存 ── */
+    @Test
+    void enableLink_更新状态并删除缓存() {
+        TLink link = ownedLink();
+        when(linkMapper.selectOne(any())).thenReturn(link);
+
+        shortLinkService.enableLink(link.getFullShortUrl(), 1);
+
+        ArgumentCaptor<TLink> captor = ArgumentCaptor.forClass(TLink.class);
+        verify(linkMapper).updateById(captor.capture());
+        assertEquals(1, captor.getValue().getEnableStatus().intValue());
+        verify(stringRedisTemplate).delete(cacheKey());
+    }
+
+    /** ── 删除：逻辑删除 + 改写 origin_url_hash 腾出唯一索引位 ── */
+    @Test
+    void deleteLink_逻辑删除_改写hash腾出唯一索引并删除缓存() {
+        String oldHash = "0123456789abcdef0123456789abcdef";
+        TLink link = ownedLink();
+        link.setId(9L);
+        link.setOriginUrlHash(oldHash);
+        when(linkMapper.selectOne(any())).thenReturn(link);
+        when(stringRedisTemplate.opsForSet()).thenReturn(setOperations);
+
+        shortLinkService.deleteLink(List.of(link.getFullShortUrl()));
+
+        ArgumentCaptor<Wrapper<TLink>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(linkMapper).update(any(), captor.capture());
+        Collection<Object> values = ((LambdaUpdateWrapper<TLink>) captor.getValue()).getParamNameValuePairs().values();
+        assertTrue(values.contains(1), "del_flag 应被置为 1");
+        assertTrue(values.stream().anyMatch(v -> v instanceof String s && s.length() == 32 && !s.equals(oldHash)),
+                "origin_url_hash 应被改写成新的 32 位值，否则唯一索引位不释放");
+
+        verify(stringRedisTemplate).delete(cacheKey());
+        verify(setOperations).remove(anyString(), eq(SHORT_URI));
+    }
+
     // ---------- helpers ----------
 
     private ShortLinkCreateReqDTO buildReq() {
@@ -322,6 +409,15 @@ class ShortLinkServiceImplTest {
         ArgumentCaptor<TLink> captor = ArgumentCaptor.forClass(TLink.class);
         verify(linkMapper).insert(captor.capture());
         return captor.getValue();
+    }
+
+    /** 一条属于当前用户、可管理的短链（带 id 与完整短链） */
+    private TLink ownedLink() {
+        TLink link = availableLink();
+        link.setId(9L);
+        link.setFullShortUrl(DOMAIN + "/" + GID + "/" + SHORT_URI);
+        link.setOriginUrlHash("0123456789abcdef0123456789abcdef");
+        return link;
     }
 
     private String cacheKey() {

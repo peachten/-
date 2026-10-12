@@ -1,11 +1,19 @@
 package com.peachten.shortlink.service.impl;
 
+import cn.hutool.core.bean.BeanUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.peachten.shortlink.common.constant.RedisKeyConstant;
 import com.peachten.shortlink.common.exception.BizException;
+import com.peachten.shortlink.common.result.PageResult;
 import com.peachten.shortlink.common.result.ResultCode;
+import com.peachten.shortlink.component.DelayedCacheDeleter;
 import com.peachten.shortlink.dao.LinkMapper;
 import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
+import com.peachten.shortlink.dto.ShortLinkPageReqDTO;
+import com.peachten.shortlink.dto.ShortLinkUpdateReqDTO;
 import com.peachten.shortlink.entity.TLink;
 import com.peachten.shortlink.service.BloomFilterService;
 import com.peachten.shortlink.service.GroupService;
@@ -14,6 +22,7 @@ import com.peachten.shortlink.util.HashUtil;
 import com.peachten.shortlink.util.LinkUtil;
 import com.peachten.shortlink.util.ShortUriGenerator;
 import com.peachten.shortlink.vo.ShortLinkCreateRespVO;
+import com.peachten.shortlink.vo.ShortLinkPageRespVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
@@ -26,6 +35,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -45,6 +55,10 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     private static final int CACHE_RANDOM_BOUND = 3600;
     /** 空值缓存 TTL：60 秒 */
     private static final long NULL_CACHE_SECONDS = 60;
+    /** 延迟双删的延迟时间（毫秒） */
+    private static final long DELAYED_DELETE_MILLIS = 500;
+    /** 逻辑删除时改写 origin_url_hash 的后缀 */
+    private static final String DELETED_HASH_SUFFIX = "_deleted_";
 
     private final LinkMapper linkMapper;
     private final GroupService groupService;
@@ -52,6 +66,7 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     private final RedissonClient redissonClient;
     private final StringRedisTemplate stringRedisTemplate;
     private final BloomFilterService bloomFilterService;
+    private final DelayedCacheDeleter delayedCacheDeleter;
 
     @Value("${short-link.domain.default:http://localhost:8000}")
     private String defaultDomain;
@@ -233,6 +248,177 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     /** W2D4 先打印日志，第 3 周改为发 MQ 异步落库 */
     private void logAccess(String gid, String shortUri) {
         log.info("短链访问, gid={}, shortUri={}", gid, shortUri);
+    }
+
+    @Override
+    public PageResult<ShortLinkPageRespVO> pageLink(ShortLinkPageReqDTO req) {
+        // 数据隔离：指定分组先校验归属；不指定则限定在当前用户的全部分组内
+        List<String> gids;
+        if (StringUtils.hasText(req.getGid())) {
+            groupService.checkOwnership(req.getGid());
+            gids = List.of(req.getGid());
+        } else {
+            gids = groupService.listGids();
+            if (gids.isEmpty()) {
+                return new PageResult<>(0, req.getCurrent(), req.getSize(), List.of());
+            }
+        }
+
+        LambdaQueryWrapper<TLink> wrapper = Wrappers.lambdaQuery(TLink.class).in(TLink::getGid, gids);
+        if (StringUtils.hasText(req.getKeyword())) {
+            String keyword = req.getKeyword();
+            wrapper.and(w -> w.like(TLink::getDescription, keyword).or().like(TLink::getOriginUrl, keyword));
+        }
+        applyOrder(wrapper, req.getOrderTag());
+
+        Page<TLink> page = linkMapper.selectPage(new Page<>(req.getCurrent(), req.getSize()), wrapper);
+        List<ShortLinkPageRespVO> records = page.getRecords().stream().map(this::toPageVO).toList();
+        return new PageResult<>(page.getTotal(), page.getCurrent(), page.getSize(), records);
+    }
+
+    @Override
+    public void updateLink(ShortLinkUpdateReqDTO req) {
+        TLink link = getOwnedLink(req.getFullShortUrl());
+        String oldGid = link.getGid();
+        String shortUri = link.getShortUri();
+
+        boolean changeGid = StringUtils.hasText(req.getGid()) && !req.getGid().equals(oldGid);
+        if (changeGid) {
+            groupService.checkOwnership(req.getGid());
+        }
+
+        String oldCacheKey = RedisKeyConstant.gotoCache(defaultDomain, oldGid, shortUri);
+        // 延迟双删第 1 步：先删缓存
+        stringRedisTemplate.delete(oldCacheKey);
+
+        LambdaUpdateWrapper<TLink> update = Wrappers.lambdaUpdate(TLink.class).eq(TLink::getId, link.getId());
+        if (changeGid) {
+            update.set(TLink::getGid, req.getGid());
+        }
+        if (req.getDescribe() != null) {
+            update.set(TLink::getDescription, req.getDescribe());
+        }
+        if (req.getValidDateType() != null) {
+            update.set(TLink::getValidDateType, req.getValidDateType());
+            if (Integer.valueOf(1).equals(req.getValidDateType())) {
+                if (req.getValidDate() == null || !req.getValidDate().isAfter(LocalDateTime.now())) {
+                    throw new BizException("失效时间必须晚于当前时间");
+                }
+                update.set(TLink::getValidDate, req.getValidDate());
+            } else {
+                // 永久：显式置空（updateById 会忽略 null 字段，必须用 set 指定）
+                update.set(TLink::getValidDate, null);
+            }
+        }
+        linkMapper.update(null, update);
+
+        // 延迟双删第 2 步：延迟再删一次，覆盖「读线程回填旧值」的时间窗
+        delayedCacheDeleter.deleteAfter(oldCacheKey, DELAYED_DELETE_MILLIS);
+
+        if (changeGid) {
+            // 分组变了：两个 Set 都要同步，否则旧分组残留该后缀、新分组查重不到
+            String newGid = req.getGid();
+            stringRedisTemplate.opsForSet().remove(RedisKeyConstant.gidSet(oldGid), shortUri);
+            String newSetKey = RedisKeyConstant.gidSet(newGid);
+            stringRedisTemplate.opsForSet().add(newSetKey, shortUri);
+            stringRedisTemplate.expire(newSetKey, Duration.ofDays(1));
+            delayedCacheDeleter.deleteAfter(
+                    RedisKeyConstant.gotoCache(defaultDomain, newGid, shortUri), DELAYED_DELETE_MILLIS);
+        }
+    }
+
+    @Override
+    public void updateBatch(List<ShortLinkUpdateReqDTO> reqList) {
+        if (reqList == null || reqList.isEmpty()) {
+            return;
+        }
+        reqList.forEach(this::updateLink);
+    }
+
+    @Override
+    public void enableLink(String fullShortUrl, Integer enableStatus) {
+        if (!Integer.valueOf(0).equals(enableStatus) && !Integer.valueOf(1).equals(enableStatus)) {
+            throw new BizException("启用状态只能是 0（启用）或 1（禁用）");
+        }
+        TLink link = getOwnedLink(fullShortUrl);
+
+        TLink update = new TLink();
+        update.setId(link.getId());
+        update.setEnableStatus(enableStatus);
+        linkMapper.updateById(update);
+
+        deleteGotoCache(link.getGid(), link.getShortUri());
+    }
+
+    @Override
+    public void deleteLink(List<String> fullShortUrls) {
+        if (fullShortUrls == null || fullShortUrls.isEmpty()) {
+            return;
+        }
+        for (String fullShortUrl : fullShortUrls) {
+            TLink link = getOwnedLink(fullShortUrl);
+            // 逻辑删除 + 改写 origin_url_hash：
+            // uk_gid_origin 不认 del_flag，删掉的记录仍占着唯一索引位，
+            // 不改写的话「删除后再创建同一长链」会直接撞唯一索引。
+            linkMapper.update(null, Wrappers.lambdaUpdate(TLink.class)
+                    .eq(TLink::getId, link.getId())
+                    .set(TLink::getDelFlag, 1)
+                    .set(TLink::getOriginUrlHash, deletedHash(link.getOriginUrlHash(), link.getId())));
+
+            deleteGotoCache(link.getGid(), link.getShortUri());
+            stringRedisTemplate.opsForSet().remove(RedisKeyConstant.gidSet(link.getGid()), link.getShortUri());
+        }
+    }
+
+    @Override
+    public long countLink(String gid) {
+        groupService.checkOwnership(gid);
+        return linkMapper.selectCount(Wrappers.lambdaQuery(TLink.class).eq(TLink::getGid, gid));
+    }
+
+    /** 排序字段白名单：绝不把用户输入拼进 SQL */
+    private void applyOrder(LambdaQueryWrapper<TLink> wrapper, String orderTag) {
+        if (!StringUtils.hasText(orderTag)) {
+            wrapper.orderByDesc(TLink::getCreateTime);
+            return;
+        }
+        switch (orderTag) {
+            case "createTime" -> wrapper.orderByDesc(TLink::getCreateTime);
+            case "clickNum" -> wrapper.orderByDesc(TLink::getClickNum);
+            default -> throw new BizException(ResultCode.PARAM_ERROR.getCode(), "不支持的排序字段: " + orderTag);
+        }
+    }
+
+    /**
+     * 逻辑删除时改写后的 hash。
+     * <p>
+     * 注意 origin_url_hash 是 CHAR(32)，放不下 "原hash_deleted_id"，
+     * 所以再取一次 MD5（仍是 32 位）：既腾出了 (gid, origin_url_hash) 唯一索引位，
+     * 又保证不同记录改写后互不相同。
+     */
+    private String deletedHash(String originUrlHash, Long id) {
+        return HashUtil.md5(originUrlHash + DELETED_HASH_SUFFIX + id);
+    }
+
+    /** 按完整短链取记录，并校验分组归属（数据隔离） */
+    private TLink getOwnedLink(String fullShortUrl) {
+        TLink link = linkMapper.selectOne(Wrappers.lambdaQuery(TLink.class)
+                .eq(TLink::getFullShortUrl, fullShortUrl));
+        if (link == null) {
+            throw new BizException("短链不存在");
+        }
+        groupService.checkOwnership(link.getGid());
+        return link;
+    }
+
+    private void deleteGotoCache(String gid, String shortUri) {
+        stringRedisTemplate.delete(RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri));
+    }
+
+    private ShortLinkPageRespVO toPageVO(TLink link) {
+        ShortLinkPageRespVO vo = new ShortLinkPageRespVO();
+        BeanUtil.copyProperties(link, vo);
+        return vo;
     }
 
     private TLink findExist(String gid, String originUrlHash) {
