@@ -1,5 +1,7 @@
 package com.peachten.shortlink.controller;
 
+import com.peachten.shortlink.common.annotation.RateLimit;
+import com.peachten.shortlink.common.enums.LimitType;
 import com.peachten.shortlink.common.result.Result;
 import com.peachten.shortlink.common.result.Results;
 import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
@@ -23,6 +25,7 @@ public class ShortLinkController {
     private final ShortLinkService shortLinkService;
 
     @Operation(summary = "创建短链（幂等，重复提交返回同一短链）")
+    @RateLimit(type = LimitType.USER, window = 60, limit = 30)
     @PostMapping
     public Result<ShortLinkCreateRespVO> create(@Valid @RequestBody ShortLinkCreateReqDTO req) {
         return Results.success(shortLinkService.create(req));

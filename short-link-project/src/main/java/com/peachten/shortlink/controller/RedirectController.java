@@ -1,5 +1,7 @@
 package com.peachten.shortlink.controller;
 
+import com.peachten.shortlink.common.annotation.RateLimit;
+import com.peachten.shortlink.common.enums.LimitType;
 import com.peachten.shortlink.service.ShortLinkService;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -35,6 +37,7 @@ public class RedirectController {
     }
 
     /** 不带分组：使用默认分组的短链 */
+    @RateLimit(type = LimitType.IP, window = 60, limit = 300)
     @GetMapping("/{shortUri:[0-9a-zA-Z]{6}}")
     public void redirectByDefaultGid(@PathVariable String shortUri,
                                      HttpServletRequest request,
@@ -43,6 +46,7 @@ public class RedirectController {
     }
 
     /** 带分组：/{gid}/{shortUri} */
+    @RateLimit(type = LimitType.IP, window = 60, limit = 300)
     @GetMapping("/{gid:[0-9a-zA-Z]+}/{shortUri:[0-9a-zA-Z]{6}}")
     public void redirectByGid(@PathVariable String gid,
                               @PathVariable String shortUri,
