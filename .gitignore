@@ -6,3 +6,7 @@
 ### 系统 ###
 Thumbs.db
 .DS_Store
+
+### 压测产物 ###
+jmeter.log
+*.jtl
