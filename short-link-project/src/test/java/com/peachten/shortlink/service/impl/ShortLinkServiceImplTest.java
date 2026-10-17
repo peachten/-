@@ -17,6 +17,7 @@ import com.peachten.shortlink.entity.TGroup;
 import com.peachten.shortlink.entity.TLink;
 import com.peachten.shortlink.service.BloomFilterService;
 import com.peachten.shortlink.service.GroupService;
+import com.peachten.shortlink.service.ShortLinkStatsService;
 import com.peachten.shortlink.util.ShortUriGenerator;
 import com.peachten.shortlink.vo.ShortLinkCreateRespVO;
 import org.junit.jupiter.api.BeforeAll;
@@ -90,6 +91,8 @@ class ShortLinkServiceImplTest {
     private DelayedCacheDeleter delayedCacheDeleter;
     @Mock
     private AccessLogProducer accessLogProducer;
+    @Mock
+    private ShortLinkStatsService shortLinkStatsService;
 
     @InjectMocks
     private ShortLinkServiceImpl shortLinkService;

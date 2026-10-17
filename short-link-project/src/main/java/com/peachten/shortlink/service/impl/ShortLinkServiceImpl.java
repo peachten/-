@@ -20,6 +20,7 @@ import com.peachten.shortlink.mq.producer.AccessLogProducer;
 import com.peachten.shortlink.service.BloomFilterService;
 import com.peachten.shortlink.service.GroupService;
 import com.peachten.shortlink.service.ShortLinkService;
+import com.peachten.shortlink.service.ShortLinkStatsService;
 import com.peachten.shortlink.util.AccessLogCollector;
 import com.peachten.shortlink.util.HashUtil;
 import com.peachten.shortlink.util.LinkUtil;
@@ -71,6 +72,7 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     private final BloomFilterService bloomFilterService;
     private final DelayedCacheDeleter delayedCacheDeleter;
     private final AccessLogProducer accessLogProducer;
+    private final ShortLinkStatsService shortLinkStatsService;
 
     @Value("${short-link.domain.default:http://localhost:8000}")
     private String defaultDomain;
@@ -250,12 +252,17 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     }
 
     /**
-     * 异步记录访问：发 MQ（失败由生产者降级同步落库）。
-     * 采集/发送出任何问题都不能影响跳转，所以这里再兜一层。
+     * 异步记录访问：实时统计写 Redis + 发 MQ（失败由生产者降级同步落库）。
+     * 统计与发消息互不影响，任何一个失败都不能影响跳转。
      */
     private void logAccess(String gid, String shortUri, TLink link) {
         try {
             AccessLogMessage message = AccessLogCollector.build(link, gid, shortUri, defaultDomain);
+            try {
+                shortLinkStatsService.recordAccess(message);
+            } catch (Exception e) {
+                log.warn("实时统计写入失败, gid={}, shortUri={}", gid, shortUri, e);
+            }
             accessLogProducer.send(message);
         } catch (Exception e) {
             log.warn("访问日志采集失败, gid={}, shortUri={}", gid, shortUri, e);
