@@ -12,6 +12,7 @@ import com.peachten.shortlink.dao.LinkMapper;
 import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
 import com.peachten.shortlink.dto.ShortLinkPageReqDTO;
 import com.peachten.shortlink.dto.ShortLinkUpdateReqDTO;
+import com.peachten.shortlink.mq.producer.AccessLogProducer;
 import com.peachten.shortlink.entity.TGroup;
 import com.peachten.shortlink.entity.TLink;
 import com.peachten.shortlink.service.BloomFilterService;
@@ -87,6 +88,8 @@ class ShortLinkServiceImplTest {
     private ValueOperations<String, String> valueOperations;
     @Mock
     private DelayedCacheDeleter delayedCacheDeleter;
+    @Mock
+    private AccessLogProducer accessLogProducer;
 
     @InjectMocks
     private ShortLinkServiceImpl shortLinkService;

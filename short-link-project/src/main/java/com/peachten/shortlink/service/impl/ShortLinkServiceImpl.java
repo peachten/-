@@ -15,9 +15,12 @@ import com.peachten.shortlink.dto.ShortLinkCreateReqDTO;
 import com.peachten.shortlink.dto.ShortLinkPageReqDTO;
 import com.peachten.shortlink.dto.ShortLinkUpdateReqDTO;
 import com.peachten.shortlink.entity.TLink;
+import com.peachten.shortlink.mq.message.AccessLogMessage;
+import com.peachten.shortlink.mq.producer.AccessLogProducer;
 import com.peachten.shortlink.service.BloomFilterService;
 import com.peachten.shortlink.service.GroupService;
 import com.peachten.shortlink.service.ShortLinkService;
+import com.peachten.shortlink.util.AccessLogCollector;
 import com.peachten.shortlink.util.HashUtil;
 import com.peachten.shortlink.util.LinkUtil;
 import com.peachten.shortlink.util.ShortUriGenerator;
@@ -67,6 +70,7 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     private final StringRedisTemplate stringRedisTemplate;
     private final BloomFilterService bloomFilterService;
     private final DelayedCacheDeleter delayedCacheDeleter;
+    private final AccessLogProducer accessLogProducer;
 
     @Value("${short-link.domain.default:http://localhost:8000}")
     private String defaultDomain;
@@ -200,7 +204,7 @@ public class ShortLinkServiceImpl implements ShortLinkService {
                 // 空值缓存：之前查过且不存在，直接 404
                 return null;
             }
-            logAccess(gid, shortUri);
+            logAccess(gid, shortUri, null);
             return cached;
         }
 
@@ -216,7 +220,7 @@ public class ShortLinkServiceImpl implements ShortLinkService {
 
         // 5. 回源：写缓存（随机 TTL 防雪崩）
         cacheOriginUrl(gid, shortUri, link.getOriginUrl());
-        logAccess(gid, shortUri);
+        logAccess(gid, shortUri, link);
         return link.getOriginUrl();
     }
 
@@ -245,9 +249,17 @@ public class ShortLinkServiceImpl implements ShortLinkService {
                 RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri), "", NULL_CACHE_SECONDS, TimeUnit.SECONDS);
     }
 
-    /** W2D4 先打印日志，第 3 周改为发 MQ 异步落库 */
-    private void logAccess(String gid, String shortUri) {
-        log.info("短链访问, gid={}, shortUri={}", gid, shortUri);
+    /**
+     * 异步记录访问：发 MQ（失败由生产者降级同步落库）。
+     * 采集/发送出任何问题都不能影响跳转，所以这里再兜一层。
+     */
+    private void logAccess(String gid, String shortUri, TLink link) {
+        try {
+            AccessLogMessage message = AccessLogCollector.build(link, gid, shortUri, defaultDomain);
+            accessLogProducer.send(message);
+        } catch (Exception e) {
+            log.warn("访问日志采集失败, gid={}, shortUri={}", gid, shortUri, e);
+        }
     }
 
     @Override

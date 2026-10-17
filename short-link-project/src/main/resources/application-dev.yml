@@ -24,6 +24,8 @@ spring:
     port: 5672
     username: guest
     password: guest
+    # MQ 不可达时别让跳转线程等太久（发送失败会降级同步落库）
+    connection-timeout: 3s
     publisher-confirm-type: correlated   # 生产者确认
     publisher-returns: true             # 路由失败回调
     listener:

@@ -1,6 +1,7 @@
 package com.peachten.shortlink.common.config;
 
 import com.peachten.shortlink.common.constant.MQConstant;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
@@ -25,6 +26,7 @@ import org.springframework.context.annotation.Configuration;
  * short-link.dlx (direct) --short-link.access-log.dlq--> short-link.access-log.dlq
  * </pre>
  */
+@Slf4j
 @Configuration
 public class RabbitMQConfig {
 
@@ -83,10 +85,27 @@ public class RabbitMQConfig {
 
     /**
      * mandatory=true：消息投递到交换机但路由不到队列时，会触发 ReturnsCallback 而不是被静默丢弃。
+     * <p>
+     * ConfirmCallback：消息到达交换机后回调（ack=false 表示没到交换机）；
+     * ReturnsCallback：到了交换机但路由不到队列。
      */
     @Bean
     public RabbitTemplateCustomizer rabbitTemplateCustomizer() {
-        return template -> template.setMandatory(true);
+        return template -> {
+            template.setMandatory(true);
+
+            template.setConfirmCallback((correlationData, ack, cause) -> {
+                if (ack) {
+                    log.debug("消息已到达交换机, correlationData={}", correlationData);
+                } else {
+                    log.error("消息未到达交换机, correlationData={}, cause={}", correlationData, cause);
+                }
+            });
+
+            template.setReturnsCallback(returned -> log.error(
+                    "消息路由失败, exchange={}, routingKey={}, replyText={}",
+                    returned.getExchange(), returned.getRoutingKey(), returned.getReplyText()));
+        };
     }
 
     /**
@@ -97,12 +116,18 @@ public class RabbitMQConfig {
      * <p>
      * 注意必须按 {@link AmqpAdmin} 注入：Boot 自动配置的 Bean 声明类型是 AmqpAdmin，
      * 按具体类 RabbitAdmin 注入会报 No qualifying bean。
+     * <p>
+     * 声明失败不阻断启动：MQ 暂时不可用时应用照常起，等恢复后首次连接会自动声明。
      */
     @Bean
     public ApplicationRunner rabbitTopologyInitializer(AmqpAdmin amqpAdmin) {
         return args -> {
             if (amqpAdmin instanceof RabbitAdmin rabbitAdmin) {
-                rabbitAdmin.initialize();
+                try {
+                    rabbitAdmin.initialize();
+                } catch (Exception e) {
+                    log.warn("RabbitMQ 拓扑初始化失败，将在连接恢复后自动声明", e);
+                }
             }
         };
     }
