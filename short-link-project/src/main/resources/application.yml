@@ -36,3 +36,6 @@ short-link:
     job:
       # 手动触发聚合接口开关（仅开发/验收用，上线前关闭）
       trigger-enabled: true
+  cache:
+    # 压测对比开关：false 时跳转不走 Redis，直查 DB（生产保持 true）
+    redirect-enabled: true

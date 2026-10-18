@@ -77,6 +77,10 @@ public class ShortLinkServiceImpl implements ShortLinkService {
     @Value("${short-link.domain.default:http://localhost:8000}")
     private String defaultDomain;
 
+    /** 压测对比开关：false 时跳过跳转缓存，直接查库（仅用于性能对比，生产保持 true） */
+    @Value("${short-link.cache.redirect-enabled:true}")
+    private boolean redirectCacheEnabled = true;
+
     @Override
     public ShortLinkCreateRespVO create(ShortLinkCreateReqDTO req) {
         // 0. 基础校验：分组归属 + 有效期/后缀等参数
@@ -199,15 +203,17 @@ public class ShortLinkServiceImpl implements ShortLinkService {
 
         String cacheKey = RedisKeyConstant.gotoCache(defaultDomain, gid, shortUri);
 
-        // 3. 查缓存：miss / 空值缓存 / 命中
-        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
-        if (cached != null) {
-            if (cached.isEmpty()) {
-                // 空值缓存：之前查过且不存在，直接 404
-                return null;
+        // 3. 查缓存：miss / 空值缓存 / 命中（压测时可关闭缓存，直查 DB）
+        if (redirectCacheEnabled) {
+            String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+            if (cached != null) {
+                if (cached.isEmpty()) {
+                    // 空值缓存：之前查过且不存在，直接 404
+                    return null;
+                }
+                logAccess(gid, shortUri, null);
+                return cached;
             }
-            logAccess(gid, shortUri, null);
-            return cached;
         }
 
         // 4. 缓存未命中：查库
@@ -216,12 +222,16 @@ public class ShortLinkServiceImpl implements ShortLinkService {
                 .eq(TLink::getShortUri, shortUri));
         // 逻辑删除的记录查不到；这里再挡掉「不存在 / 已禁用 / 已过期」
         if (link == null || Integer.valueOf(1).equals(link.getEnableStatus()) || isExpired(link)) {
-            cacheNull(gid, shortUri);
+            if (redirectCacheEnabled) {
+                cacheNull(gid, shortUri);
+            }
             return null;
         }
 
         // 5. 回源：写缓存（随机 TTL 防雪崩）
-        cacheOriginUrl(gid, shortUri, link.getOriginUrl());
+        if (redirectCacheEnabled) {
+            cacheOriginUrl(gid, shortUri, link.getOriginUrl());
+        }
         logAccess(gid, shortUri, link);
         return link.getOriginUrl();
     }

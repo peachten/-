@@ -9,7 +9,7 @@
         <collectionProp name="Arguments.arguments">
           <elementProp name="token" elementType="Argument">
             <stringProp name="Argument.name">token</stringProp>
-            <stringProp name="Argument.value">CHANGE_ME_BEFORE_RUN</stringProp>
+            <stringProp name="Argument.value">${__P(token,CHANGE_ME_BEFORE_RUN)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
             <stringProp name="Argument.desc">跑前替换为登录接口返回的 token</stringProp>
           </elementProp>
@@ -50,7 +50,7 @@
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">{&quot;originUrl&quot;:&quot;https://example.com/jmeter/bench&quot;,&quot;gid&quot;:&quot;710a6a&quot;}</stringProp>
+                <stringProp name="Argument.value">{&quot;originUrl&quot;:&quot;https://example.com/jmeter/bench-d5&quot;,&quot;gid&quot;:&quot;testGp&quot;}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
@@ -70,12 +70,22 @@
             </collectionProp>
           </HeaderManager>
           <hashTree/>
+          <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report" enabled="true">
+            <boolProp name="ResultCollector.error_logging">false</boolProp>
+            <stringProp name="filename"></stringProp>
+          </ResultCollector>
+          <hashTree/>
+          <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector" testname="Aggregate Report" enabled="true">
+            <boolProp name="ResultCollector.error_logging">false</boolProp>
+            <stringProp name="filename">jmeter/results/create-concurrent-aggregate.csv</stringProp>
+          </ResultCollector>
+          <hashTree/>
+          <ResultCollector guiclass="RespTimeGraphVisualizer" testclass="ResultCollector" testname="Response Time Graph" enabled="true">
+            <boolProp name="ResultCollector.error_logging">false</boolProp>
+            <stringProp name="filename">jmeter/results/create-concurrent-rt.png</stringProp>
+          </ResultCollector>
+          <hashTree/>
         </hashTree>
-        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary Report" enabled="true">
-          <boolProp name="ResultCollector.error_logging">false</boolProp>
-          <stringProp name="filename"></stringProp>
-        </ResultCollector>
-        <hashTree/>
       </hashTree>
     </hashTree>
   </hashTree>

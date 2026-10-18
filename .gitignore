@@ -10,3 +10,4 @@ Thumbs.db
 ### 压测产物 ###
 jmeter.log
 *.jtl
+jmeter/results/
