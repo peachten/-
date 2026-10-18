@@ -35,6 +35,8 @@ const loadList = async () => {
   loading.value = true
   try {
     groups.value = await listGroups()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     loading.value = false
   }
@@ -58,6 +60,8 @@ const submitCreate = async () => {
     ElMessage.success('创建成功')
     createVisible.value = false
     await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     createLoading.value = false
   }
@@ -82,6 +86,8 @@ const submitRename = async () => {
     ElMessage.success('修改成功')
     renameVisible.value = false
     await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     renameLoading.value = false
   }
@@ -97,9 +103,13 @@ const handleDelete = async (row) => {
   } catch {
     return
   }
-  await deleteGroup(row.gid)
-  ElMessage.success('删除成功')
-  await loadList()
+  try {
+    await deleteGroup(row.gid)
+    ElMessage.success('删除成功')
+    await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
+  }
 }
 
 onMounted(loadList)
@@ -114,7 +124,7 @@ onMounted(loadList)
       </div>
     </template>
 
-    <el-table v-loading="loading" :data="groups" border stripe>
+    <el-table v-loading="loading" :data="groups" border stripe empty-text="暂无分组，点击右上角新建">
       <el-table-column prop="name" label="分组名称" min-width="180" />
       <el-table-column prop="gid" label="分组标识" min-width="140" />
       <el-table-column prop="linkCount" label="短链数量" width="110" align="center" />

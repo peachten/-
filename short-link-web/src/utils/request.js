@@ -39,12 +39,25 @@ service.interceptors.response.use(
     return res.data
   },
   (error) => {
-    if (error.response && error.response.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('username')
-      window.location.href = '/login'
+    if (error.response) {
+      const status = error.response.status
+      if (status === 401) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('username')
+        window.location.href = '/login'
+      }
+      if (status === 502 || status === 503 || status === 504) {
+        // 网关 / 代理层拿不到后端（后端未启动、已挂掉）
+        ElMessage.error({ message: '网络异常，请稍后重试', grouping: true })
+      } else {
+        // 优先展示后端返回的 message（参数错误、分组不存在等）
+        const message = error.response.data?.message || `请求失败（${status}）`
+        ElMessage.error({ message, grouping: true })
+      }
+    } else {
+      // 断网、超时等没有响应的情况
+      ElMessage.error({ message: '网络异常，请稍后重试', grouping: true })
     }
-    ElMessage.error(error.message || '网络异常')
     return Promise.reject(error)
   }
 )

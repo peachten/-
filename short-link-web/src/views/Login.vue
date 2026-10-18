@@ -51,6 +51,8 @@ const handleLogin = async () => {
     await userStore.login(loginForm)
     ElMessage.success('登录成功')
     router.push(route.query.redirect || '/link')
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     loginLoading.value = false
   }
@@ -74,6 +76,8 @@ const handleRegister = async () => {
     registerForm.password = ''
     registerForm.confirmPassword = ''
     activeTab.value = 'login'
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     registerLoading.value = false
   }

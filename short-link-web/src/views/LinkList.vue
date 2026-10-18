@@ -101,9 +101,13 @@ const formatDate = (value) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm') :
 const toBackendDate = (value) => (value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : null)
 
 const loadGroups = async () => {
-  groups.value = await listGroups()
-  if (!createForm.gid && groups.value.length) {
-    createForm.gid = groups.value[0].gid
+  try {
+    groups.value = await listGroups()
+    if (!createForm.gid && groups.value.length) {
+      createForm.gid = groups.value[0].gid
+    }
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   }
 }
 
@@ -117,6 +121,8 @@ const loadList = async () => {
     const page = await pageLinks(params)
     list.value = page.records
     total.value = page.total
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     loading.value = false
   }
@@ -180,6 +186,8 @@ const submitCreate = async () => {
     createdUrl.value = data.fullShortUrl
     ElMessage.success(data.idempotent ? '该链接已存在，已返回原短链' : '创建成功')
     await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     createLoading.value = false
   }
@@ -214,6 +222,8 @@ const submitEdit = async () => {
     ElMessage.success('保存成功')
     editVisible.value = false
     await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   } finally {
     editLoading.value = false
   }
@@ -239,12 +249,16 @@ const handleDelete = async (row) => {
   } catch {
     return
   }
-  await deleteLinks([row.fullShortUrl])
-  ElMessage.success('删除成功')
-  if (list.value.length === 1 && query.current > 1) {
-    query.current -= 1
+  try {
+    await deleteLinks([row.fullShortUrl])
+    ElMessage.success('删除成功')
+    if (list.value.length === 1 && query.current > 1) {
+      query.current -= 1
+    }
+    await loadList()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
   }
-  await loadList()
 }
 
 onMounted(async () => {
@@ -291,7 +305,7 @@ onMounted(async () => {
     </el-form>
 
     <!-- 列表 -->
-    <el-table v-loading="loading" :data="list" border stripe>
+    <el-table v-loading="loading" :data="list" border stripe empty-text="暂无短链，点击右上角新建">
       <el-table-column label="短链" min-width="230">
         <template #default="{ row }">
           <div class="short-url">

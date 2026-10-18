@@ -198,7 +198,11 @@ const handleResize = () => {
 
 /* ---------- 数据加载 ---------- */
 const loadGroups = async () => {
-  groups.value = await listGroups()
+  try {
+    groups.value = await listGroups()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
+  }
 }
 
 const loadLinks = async () => {
@@ -206,9 +210,13 @@ const loadLinks = async () => {
   if (gid.value !== 'all') {
     params.gid = gid.value
   }
-  const page = await pageLinks(params)
-  links.value = page.records
-  linkTotal.value = page.total
+  try {
+    const page = await pageLinks(params)
+    links.value = page.records
+    linkTotal.value = page.total
+  } catch {
+    // 错误提示已由 request 拦截器统一处理
+  }
 }
 
 const loadAll = async () => {
@@ -238,6 +246,8 @@ const loadAll = async () => {
 
     await nextTick()
     renderAll()
+  } catch {
+    // 错误提示已由 request 拦截器统一处理，页面继续展示空状态
   } finally {
     loading.value = false
   }
